@@ -14,7 +14,7 @@ const path = require('path');
 const { execSync } = require('child_process');
 
 // --- Config ---
-const SYNC_FILES = ['MEMORY.md', 'session-handoff.md'];
+const SYNC_FILES = ['MEMORY.md', 'session-handoff.md', 'CLAUDE.md'];
 const DEV_LOG_PATTERN = /^\d{4}-\d{2}-\d{2}\.md$/;
 
 // --- Find the shared memory repo ---
@@ -37,6 +37,12 @@ function findRepo() {
       candidates.push(path.join(`${d}:`, 'nex-memory'));
       candidates.push(path.join(`${d}:`, 'dev', 'nex-memory'));
     }
+  }
+
+  // Common Linux server paths
+  if (process.platform === 'linux') {
+    candidates.push('/root/nex-memory');
+    candidates.push('/root/nlc-memory');
   }
 
   for (const p of candidates) {
@@ -134,7 +140,7 @@ function copyIfDifferent(src, dst) {
   return false;
 }
 
-function syncPull(repoPath, memoryDir) {
+function syncPull(repoPath, memoryDir, cwd) {
   gitPull(repoPath);
 
   if (!fs.existsSync(memoryDir)) fs.mkdirSync(memoryDir, { recursive: true });
@@ -142,25 +148,41 @@ function syncPull(repoPath, memoryDir) {
   const files = getFilesToSync(repoPath);
   let copied = 0;
   for (const f of files) {
-    if (copyIfDifferent(path.join(repoPath, f), path.join(memoryDir, f))) copied++;
+    if (f === 'CLAUDE.md') {
+      // CLAUDE.md goes to CWD (project root), not memory dir
+      if (copyIfDifferent(path.join(repoPath, f), path.join(cwd, f))) copied++;
+    } else {
+      if (copyIfDifferent(path.join(repoPath, f), path.join(memoryDir, f))) copied++;
+    }
   }
   return copied;
 }
 
-function syncPush(repoPath, memoryDir) {
-  if (!fs.existsSync(memoryDir)) return 0;
-
-  const files = getFilesToSync(memoryDir);
+function syncPush(repoPath, memoryDir, cwd) {
   let copied = 0;
-  for (const f of files) {
-    if (copyIfDifferent(path.join(memoryDir, f), path.join(repoPath, f))) copied++;
+
+  // Copy memory files from local memory dir → repo
+  if (fs.existsSync(memoryDir)) {
+    const files = getFilesToSync(memoryDir);
+    for (const f of files) {
+      if (f === 'CLAUDE.md') continue; // CLAUDE.md lives in CWD, handled below
+      if (copyIfDifferent(path.join(memoryDir, f), path.join(repoPath, f))) copied++;
+    }
   }
 
-  // Also pull files that only exist in repo (from other machine)
+  // Copy CLAUDE.md from CWD → repo
+  const claudePath = path.join(cwd, 'CLAUDE.md');
+  if (fs.existsSync(claudePath)) {
+    if (copyIfDifferent(claudePath, path.join(repoPath, 'CLAUDE.md'))) copied++;
+  }
+
+  // Also pull files from repo that only exist locally (from other machine)
   const repoFiles = getFilesToSync(repoPath);
   for (const f of repoFiles) {
-    if (!files.includes(f)) {
-      if (copyIfDifferent(path.join(repoPath, f), path.join(memoryDir, f))) copied++;
+    if (f === 'CLAUDE.md') continue;
+    const localPath = path.join(memoryDir, f);
+    if (!fs.existsSync(localPath)) {
+      if (copyIfDifferent(path.join(repoPath, f), localPath)) copied++;
     }
   }
 
@@ -184,9 +206,9 @@ process.stdin.on('end', () => {
     const memoryDir = getMemoryDir(cwd);
 
     if (hookType === 'SessionStart' || hookType === 'session_start') {
-      syncPull(repoPath, memoryDir);
+      syncPull(repoPath, memoryDir, cwd);
     } else {
-      syncPush(repoPath, memoryDir);
+      syncPush(repoPath, memoryDir, cwd);
     }
   } catch {
     // Silent failure — never disrupt the agent's work
