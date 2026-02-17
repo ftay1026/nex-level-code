@@ -1,0 +1,372 @@
+diff --git a/server/claude-sdk.js b/server/claude-sdk.js
+index ea47c37..f0ca1f2 100644
+--- a/server/claude-sdk.js
++++ b/server/claude-sdk.js
+@@ -474,24 +474,9 @@ async function queryClaudeSDK(command, options = {}, ws) {
+     sdkOptions.canUseTool = async (toolName, input, context) => {
+       const requiresInteraction = TOOLS_REQUIRING_INTERACTION.has(toolName);
+ 
++      // Auto-approve all non-interactive tools (no permission popups)
+       if (!requiresInteraction) {
+-        if (sdkOptions.permissionMode === 'bypassPermissions') {
+-          return { behavior: 'allow', updatedInput: input };
+-        }
+-
+-        const isDisallowed = (sdkOptions.disallowedTools || []).some(entry =>
+-          matchesToolPermission(entry, toolName, input)
+-        );
+-        if (isDisallowed) {
+-          return { behavior: 'deny', message: 'Tool disallowed by settings' };
+-        }
+-
+-        const isAllowed = (sdkOptions.allowedTools || []).some(entry =>
+-          matchesToolPermission(entry, toolName, input)
+-        );
+-        if (isAllowed) {
+-          return { behavior: 'allow', updatedInput: input };
+-        }
++        return { behavior: 'allow', updatedInput: input };
+       }
+ 
+       const requestId = createRequestId();
+@@ -560,6 +545,7 @@ async function queryClaudeSDK(command, options = {}, ws) {
+     }
+ 
+     // Process streaming messages
++    let completionSent = false;
+     console.log('Starting async generator loop for session:', capturedSessionId || 'NEW');
+     for await (const message of queryInstance) {
+       // Capture session ID from first message
+@@ -606,6 +592,17 @@ async function queryClaudeSDK(command, options = {}, ws) {
+             sessionId: capturedSessionId || sessionId || null
+           });
+         }
++        // Send claude-complete immediately on result, do not wait for stream close
++        if (!completionSent) {
++          completionSent = true;
++          console.log("Result received, sending claude-complete immediately");
++          ws.send({
++            type: "claude-complete",
++            sessionId: capturedSessionId,
++            exitCode: 0,
++            isNewSession: !sessionId && !!command
++          });
++        }
+       }
+     }
+ 
+@@ -617,15 +614,18 @@ async function queryClaudeSDK(command, options = {}, ws) {
+     // Clean up temporary image files
+     await cleanupTempFiles(tempImagePaths, tempDir);
+ 
+-    // Send completion event
+-    console.log('Streaming complete, sending claude-complete event');
+-    ws.send({
+-      type: 'claude-complete',
+-      sessionId: capturedSessionId,
+-      exitCode: 0,
+-      isNewSession: !sessionId && !!command
+-    });
+-    console.log('claude-complete event sent');
++    // Send completion event (fallback if not already sent)
++    if (!completionSent) {
++      console.log("Streaming complete, sending claude-complete event (fallback)");
++      ws.send({
++        type: "claude-complete",
++        sessionId: capturedSessionId,
++        exitCode: 0,
++        isNewSession: !sessionId && !!command
++      });
++    } else {
++      console.log("Streaming complete, claude-complete already sent");
++    }
+ 
+   } catch (error) {
+     console.error('SDK query error:', error);
+diff --git a/server/index.js b/server/index.js
+index 49c2c5d..6af99d6 100755
+--- a/server/index.js
++++ b/server/index.js
+@@ -29,6 +29,17 @@ const c = {
+     dim: (text) => `${colors.dim}${text}${colors.reset}`,
+ };
+ 
++// Process-level error handlers — prevent unhandled errors from crashing the server
++process.on('uncaughtException', (error) => {
++  console.error('[FATAL] Uncaught exception:', error);
++  // Don't exit — let PM2 decide. Log the error and continue.
++});
++
++process.on('unhandledRejection', (reason, promise) => {
++  console.error('[FATAL] Unhandled rejection at:', promise, 'reason:', reason);
++  // Don't exit — let PM2 decide. Log the error and continue.
++});
++
+ console.log('PORT from env:', process.env.PORT);
+ 
+ import express from 'express';
+@@ -48,6 +59,23 @@ import { spawnCursor, abortCursorSession, isCursorSessionActive, getActiveCursor
+ import { queryCodex, abortCodexSession, isCodexSessionActive, getActiveCodexSessions } from './openai-codex.js';
+ import gitRoutes from './routes/git.js';
+ import authRoutes from './routes/auth.js';
++
++// Graceful shutdown — abort active SDK sessions before exit
++async function gracefulShutdown(signal) {
++  console.log('[INFO] Received ' + signal + ', shutting down gracefully...');
++  const sessions = getActiveClaudeSDKSessions();
++  for (const sessionId of sessions) {
++    try {
++      await abortClaudeSDKSession(sessionId);
++      console.log('[INFO] Aborted session:', sessionId);
++    } catch (err) {
++      console.error('[WARN] Failed to abort session:', sessionId, err.message);
++    }
++  }
++  process.exit(0);
++}
++process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
++process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+ import mcpRoutes from './routes/mcp.js';
+ import cursorRoutes from './routes/cursor.js';
+ import taskmasterRoutes from './routes/taskmaster.js';
+@@ -1040,10 +1068,21 @@ function handleChatConnection(ws) {
+         }
+     });
+ 
+-    ws.on('close', () => {
+-        console.log('🔌 Chat client disconnected');
+-        // Remove from connected clients
++    ws.on('close', async () => {
++        console.log('[INFO] Chat client disconnected');
+         connectedClients.delete(ws);
++
++        // Abort any active SDK session tied to this writer
++        const sessionId = writer.getSessionId();
++        if (sessionId && isClaudeSDKSessionActive(sessionId)) {
++            console.log('[INFO] Aborting orphaned SDK session:', sessionId);
++            try {
++                await abortClaudeSDKSession(sessionId);
++                console.log('[INFO] Orphaned session aborted successfully');
++            } catch (err) {
++                console.error('[WARN] Failed to abort orphaned session:', err.message);
++            }
++        }
+     });
+ }
+ 
+diff --git a/src/components/chat/hooks/useChatRealtimeHandlers.ts b/src/components/chat/hooks/useChatRealtimeHandlers.ts
+index 9d2071b..e4ffc25 100644
+--- a/src/components/chat/hooks/useChatRealtimeHandlers.ts
++++ b/src/components/chat/hooks/useChatRealtimeHandlers.ts
+@@ -212,7 +212,7 @@ export function useChatRealtimeHandlers({
+         if (latestMessage.sessionId && lifecycleMessageTypes.has(String(latestMessage.type))) {
+           handleBackgroundLifecycle(latestMessage.sessionId);
+         }
+-        if (!isUnscopedError) {
++        if (!isUnscopedError && !lifecycleMessageTypes.has(String(latestMessage.type))) {
+           return;
+         }
+       }
+@@ -231,7 +231,7 @@ export function useChatRealtimeHandlers({
+           'current:',
+           activeViewSessionId,
+         );
+-        return;
++        if (!lifecycleMessageTypes.has(String(latestMessage.type))) return;
+       }
+     }
+ 
+diff --git a/src/components/chat/view/ChatInterface.tsx b/src/components/chat/view/ChatInterface.tsx
+index 80b25cd..c9c0248 100644
+--- a/src/components/chat/view/ChatInterface.tsx
++++ b/src/components/chat/view/ChatInterface.tsx
+@@ -317,12 +317,12 @@ function ChatInterface({
+           showThinking={showThinking}
+           selectedProject={selectedProject}
+           isLoading={isLoading}
+-        />
+-
+-        <ChatComposer
+           pendingPermissionRequests={pendingPermissionRequests}
+           handlePermissionDecision={handlePermissionDecision}
+           handleGrantToolPermission={handleGrantToolPermission}
++        />
++
++        <ChatComposer
+           claudeStatus={claudeStatus}
+           isLoading={isLoading}
+           onAbortSession={handleAbortSession}
+diff --git a/src/components/chat/view/subcomponents/ChatComposer.tsx b/src/components/chat/view/subcomponents/ChatComposer.tsx
+index 8a9bb44..5932bd9 100644
+--- a/src/components/chat/view/subcomponents/ChatComposer.tsx
++++ b/src/components/chat/view/subcomponents/ChatComposer.tsx
+@@ -2,7 +2,6 @@ import CommandMenu from '../../../CommandMenu';
+ import ClaudeStatus from '../../../ClaudeStatus';
+ import { MicButton } from '../../../MicButton.jsx';
+ import ImageAttachment from './ImageAttachment';
+-import PermissionRequestsBanner from './PermissionRequestsBanner';
+ import ChatInputControls from './ChatInputControls';
+ import { useTranslation } from 'react-i18next';
+ import type {
+@@ -17,7 +16,7 @@ import type {
+   SetStateAction,
+   TouchEvent,
+ } from 'react';
+-import type { PendingPermissionRequest, PermissionMode, Provider } from '../../types/types';
++import type { PermissionMode, Provider } from '../../types/types';
+ 
+ interface MentionableFile {
+   name: string;
+@@ -35,12 +34,6 @@ interface SlashCommand {
+ }
+ 
+ interface ChatComposerProps {
+-  pendingPermissionRequests: PendingPermissionRequest[];
+-  handlePermissionDecision: (
+-    requestIds: string | string[],
+-    decision: { allow?: boolean; message?: string; rememberEntry?: string | null; updatedInput?: unknown },
+-  ) => void;
+-  handleGrantToolPermission: (suggestion: { entry: string; toolName: string }) => { success: boolean };
+   claudeStatus: { text: string; tokens: number; can_interrupt: boolean } | null;
+   isLoading: boolean;
+   onAbortSession: () => void;
+@@ -94,9 +87,6 @@ interface ChatComposerProps {
+ }
+ 
+ export default function ChatComposer({
+-  pendingPermissionRequests,
+-  handlePermissionDecision,
+-  handleGrantToolPermission,
+   claudeStatus,
+   isLoading,
+   onAbortSession,
+@@ -157,32 +147,19 @@ export default function ChatComposer({
+     bottom: textareaRect ? window.innerHeight - textareaRect.top + 8 : 90,
+   };
+ 
+-  // Detect if the AskUserQuestion interactive panel is active
+-  const hasQuestionPanel = pendingPermissionRequests.some(
+-    (r) => r.toolName === 'AskUserQuestion'
+-  );
+-
+   return (
+     <div className="p-2 sm:p-4 md:p-4 flex-shrink-0 pb-2 sm:pb-4 md:pb-6">
+-      {!hasQuestionPanel && (
+-        <div className="flex-1">
+-          <ClaudeStatus
+-            status={claudeStatus}
+-            isLoading={isLoading}
+-            onAbort={onAbortSession}
+-            provider={provider}
+-          />
+-        </div>
+-      )}
+-
+-      <div className="max-w-4xl mx-auto mb-3">
+-        <PermissionRequestsBanner
+-          pendingPermissionRequests={pendingPermissionRequests}
+-          handlePermissionDecision={handlePermissionDecision}
+-          handleGrantToolPermission={handleGrantToolPermission}
++      <div className="flex-1">
++        <ClaudeStatus
++          status={claudeStatus}
++          isLoading={isLoading}
++          onAbort={onAbortSession}
++          provider={provider}
+         />
++      </div>
+ 
+-        {!hasQuestionPanel && <ChatInputControls
++      <div className="max-w-4xl mx-auto mb-3">
++        <ChatInputControls
+           permissionMode={permissionMode}
+           onModeSwitch={onModeSwitch}
+           provider={provider}
+@@ -196,10 +173,10 @@ export default function ChatComposer({
+           isUserScrolledUp={isUserScrolledUp}
+           hasMessages={hasMessages}
+           onScrollToBottom={onScrollToBottom}
+-        />}
++        />
+       </div>
+ 
+-      {!hasQuestionPanel && <form onSubmit={onSubmit as (event: FormEvent<HTMLFormElement>) => void} className="relative max-w-4xl mx-auto">
++      <form onSubmit={onSubmit as (event: FormEvent<HTMLFormElement>) => void} className="relative max-w-4xl mx-auto">
+         {isDragActive && (
+           <div className="absolute inset-0 bg-primary/15 border-2 border-dashed border-primary/50 rounded-2xl flex items-center justify-center z-50">
+             <div className="bg-card rounded-xl p-4 shadow-lg border border-border/30">
+@@ -295,8 +272,7 @@ export default function ChatComposer({
+               onBlur={() => onInputFocusChange?.(false)}
+               onInput={onTextareaInput}
+               placeholder={placeholder}
+-              disabled={isLoading}
+-              className="chat-input-placeholder block w-full pl-12 pr-20 sm:pr-40 py-1.5 sm:py-4 bg-transparent rounded-2xl focus:outline-none text-foreground placeholder-muted-foreground/50 disabled:opacity-50 resize-none min-h-[50px] sm:min-h-[80px] max-h-[40vh] sm:max-h-[300px] overflow-y-auto text-base leading-6 transition-all duration-200"
++              className="chat-input-placeholder block w-full pl-12 pr-20 sm:pr-40 py-1.5 sm:py-4 bg-transparent rounded-2xl focus:outline-none text-foreground placeholder-muted-foreground/50 resize-none min-h-[50px] sm:min-h-[80px] max-h-[40vh] sm:max-h-[300px] overflow-y-auto text-base leading-6 transition-all duration-200"
+               style={{ height: '50px' }}
+             />
+ 
+@@ -347,7 +323,7 @@ export default function ChatComposer({
+             </div>
+           </div>
+         </div>
+-      </form>}
++      </form>
+     </div>
+   );
+ }
+diff --git a/src/components/chat/view/subcomponents/ChatMessagesPane.tsx b/src/components/chat/view/subcomponents/ChatMessagesPane.tsx
+index ea38ed7..001365d 100644
+--- a/src/components/chat/view/subcomponents/ChatMessagesPane.tsx
++++ b/src/components/chat/view/subcomponents/ChatMessagesPane.tsx
+@@ -4,9 +4,10 @@ import type { Dispatch, RefObject, SetStateAction } from 'react';
+ 
+ import MessageComponent from './MessageComponent';
+ import ProviderSelectionEmptyState from './ProviderSelectionEmptyState';
+-import type { ChatMessage } from '../../types/types';
++import type { ChatMessage, PendingPermissionRequest } from '../../types/types';
+ import type { Project, ProjectSession, SessionProvider } from '../../../../types/app';
+ import AssistantThinkingIndicator from './AssistantThinkingIndicator';
++import PermissionRequestsBanner from './PermissionRequestsBanner';
+ import { getIntrinsicMessageKey } from '../../utils/messageKeys';
+ 
+ interface ChatMessagesPaneProps {
+@@ -51,6 +52,12 @@ interface ChatMessagesPaneProps {
+   showThinking?: boolean;
+   selectedProject: Project;
+   isLoading: boolean;
++  pendingPermissionRequests: PendingPermissionRequest[];
++  handlePermissionDecision: (
++    requestIds: string | string[],
++    decision: { allow?: boolean; message?: string; rememberEntry?: string | null; updatedInput?: unknown },
++  ) => void;
++  handleGrantToolPermission: (suggestion: { entry: string; toolName: string }) => { success: boolean };
+ }
+ 
+ export default function ChatMessagesPane({
+@@ -95,6 +102,9 @@ export default function ChatMessagesPane({
+   showThinking,
+   selectedProject,
+   isLoading,
++  pendingPermissionRequests,
++  handlePermissionDecision,
++  handleGrantToolPermission,
+ }: ChatMessagesPaneProps) {
+   const { t } = useTranslation('chat');
+   const messageKeyMapRef = useRef<WeakMap<ChatMessage, string>>(new WeakMap());
+@@ -258,6 +268,16 @@ export default function ChatMessagesPane({
+         </>
+       )}
+ 
++      {pendingPermissionRequests.length > 0 && (
++        <div className="max-w-4xl mx-auto px-2 sm:px-4">
++          <PermissionRequestsBanner
++            pendingPermissionRequests={pendingPermissionRequests}
++            handlePermissionDecision={handlePermissionDecision}
++            handleGrantToolPermission={handleGrantToolPermission}
++          />
++        </div>
++      )}
++
+       {isLoading && <AssistantThinkingIndicator selectedProvider={provider} />}
+     </div>
+   );

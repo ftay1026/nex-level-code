@@ -211,6 +211,33 @@ export class InstallService {
       ],
     };
 
+    // Detect and wire memory-mcp (claude-code-memory) if installed
+    const memoryMcpExtractor = this.findMemoryMcpExtractor(nodePath);
+    if (memoryMcpExtractor) {
+      // Register on Stop, PreCompact, SessionEnd
+      for (const event of ['Stop', 'PreCompact', 'SessionEnd']) {
+        if (!tool.hooks.events.includes(event)) continue;
+        if (!settings.hooks[event]) settings.hooks[event] = [];
+
+        const alreadyRegistered = settings.hooks[event].some((hookGroup: any) =>
+          hookGroup.hooks?.some((h: any) => h.command?.includes('extractor'))
+        );
+
+        if (!alreadyRegistered) {
+          const command = `${q(nodePath)} ${q(memoryMcpExtractor)}`;
+          settings.hooks[event].push({
+            hooks: [{ type: 'command', command, timeout: 30 }],
+          });
+          result.hooksRegistered.push(`${event} → memory-mcp extractor`);
+          console.log(chalk.dim(`    ✓ ${event} → memory-mcp extractor`));
+        }
+      }
+    } else {
+      result.warnings.push(
+        'memory-mcp (claude-code-memory) not found. Install for preference extraction: npm install -g claude-code-memory'
+      );
+    }
+
     for (const [event, scripts] of Object.entries(hookMap)) {
       if (!tool.hooks.events.includes(event)) continue;
 
@@ -430,6 +457,45 @@ export class InstallService {
     await fs.writeJSON(mcpConfigFile, config, { spaces: 2 });
     result.mcpConfigured = true;
     console.log(chalk.dim('    ✓ NLC MCP server registered'));
+  }
+
+  // ─── Helpers ────────────────────────────────────────────────
+
+  /**
+   * Find the memory-mcp (claude-code-memory) extractor script.
+   * Returns the full path to extractor.js if installed globally, or null.
+   */
+  private findMemoryMcpExtractor(nodePath: string): string | null {
+    const home = os.homedir();
+    const candidates: string[] = [];
+
+    if (process.platform === 'win32') {
+      // Windows: npm global installs to AppData/Roaming/npm
+      candidates.push(
+        path.join(home, 'AppData', 'Roaming', 'npm', 'node_modules', 'claude-code-memory', 'dist', 'extractor.js'),
+        path.join(home, 'AppData', 'Roaming', 'npm', 'node_modules', 'claude-code-memory', 'extractor.js'),
+      );
+    } else {
+      // Linux/macOS: common global npm locations
+      candidates.push(
+        '/usr/local/lib/node_modules/claude-code-memory/dist/extractor.js',
+        '/usr/lib/node_modules/claude-code-memory/dist/extractor.js',
+        path.join(home, '.npm-global', 'lib', 'node_modules', 'claude-code-memory', 'dist', 'extractor.js'),
+        path.join(home, '.nvm', 'versions', 'node', process.version, 'lib', 'node_modules', 'claude-code-memory', 'dist', 'extractor.js'),
+      );
+    }
+
+    // Also try require.resolve as a fallback
+    try {
+      const resolved = require.resolve('claude-code-memory/dist/extractor.js');
+      if (resolved) return resolved;
+    } catch {}
+
+    for (const p of candidates) {
+      if (fs.pathExistsSync(p)) return p;
+    }
+
+    return null;
   }
 
   // ─── Summary ────────────────────────────────────────────────

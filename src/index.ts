@@ -8,6 +8,7 @@ import { registerUpdateCommand } from './commands/update';
 import { registerUninstallCommand } from './commands/uninstall';
 import { registerMcpCommand } from './commands/mcp';
 import { registerSyncCommand } from './commands/sync';
+import { registerWebUICommand } from './commands/webui';
 
 const program = new Command();
 
@@ -23,5 +24,6 @@ registerUpdateCommand(program);
 registerUninstallCommand(program);
 registerMcpCommand(program);
 registerSyncCommand(program);
+registerWebUICommand(program);
 
 program.parse();
