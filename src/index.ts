@@ -7,6 +7,7 @@ import { registerDoctorCommand } from './commands/doctor';
 import { registerUpdateCommand } from './commands/update';
 import { registerUninstallCommand } from './commands/uninstall';
 import { registerMcpCommand } from './commands/mcp';
+import { registerSyncCommand } from './commands/sync';
 
 const program = new Command();
 
@@ -21,5 +22,6 @@ registerDoctorCommand(program);
 registerUpdateCommand(program);
 registerUninstallCommand(program);
 registerMcpCommand(program);
+registerSyncCommand(program);
 
 program.parse();
