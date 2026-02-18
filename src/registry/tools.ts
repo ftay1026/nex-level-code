@@ -64,7 +64,7 @@ export const TOOL_REGISTRY: ToolDefinition[] = [
       scriptsDir: path.join(HOME, '.claude', 'scripts'),
       settingsFile: path.join(HOME, '.claude', 'settings.json'),
       rulesFile: 'CLAUDE.md',
-      mcpConfigFile: '.mcp.json',
+      mcpConfigFile: path.join(HOME, '.claude', 'mcp.json'),
       memoryDir: path.join(HOME, '.claude', 'projects'),
     },
     hooks: {

@@ -25,4 +25,18 @@
 - Be concise and direct
 - Use plain language — avoid jargon unless the user uses it first
 - When presenting options, clearly distinguish proper solutions from workarounds
-- Never make confident assertions about things you're uncertain about
+- Never make confident assertions about things you're uncertain about.
+
+## Sub-Agent Model Router (Mandatory)
+
+Opus stays as the main conversation thread. ALL tasks are dispatched to sub-agents. Model selection is mechanical — no judgment calls.
+
+| Question | Answer | Model |
+|----------|--------|-------|
+| Does the task modify any file? | No | **Haiku** |
+| Has Opus specified the exact file(s), exact location, AND exact change? | All three yes | **Sonnet** |
+| Missing any of the above? | — | **Opus** |
+
+**Escape clause:** If a sub-agent encounters anything unexpected, it **stops and returns to Opus**. No improvising. No quick fixes. No alternative approaches.
+
+**Trigger keyword: "Do it"** — When the user says "Do it", Opus MUST state the routing decision out loud before dispatching. Format: `Route: [task] → [Haiku/Sonnet/Opus] because [reason]`. User sees the route and can override before tokens are spent.
