@@ -1,6 +1,6 @@
 {
   "name": "nex-level-code",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Nex Level Code (NLC) — 1-click setup for AI coding agent infrastructure. Memory, logging, workflow, and behavioral rules for Claude Code, Cursor, Codex, and more.",
   "main": "dist/index.js",
   "bin": {
