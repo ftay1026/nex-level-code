@@ -14,8 +14,9 @@ const path = require('path');
 const { execSync } = require('child_process');
 
 // --- Config ---
-const SYNC_FILES = ['MEMORY.md', 'session-handoff.md', 'CLAUDE.md'];
+const SYNC_FILES = ['MEMORY.md', 'session-handoff.md', 'CLAUDE.md', 'tooling-backlog.md'];
 const DEV_LOG_PATTERN = /^\d{4}-\d{2}-\d{2}\.md$/;
+const TRANSCRIPT_PATTERN = /^transcript-.*\.md$/;
 
 // --- Find the shared memory repo ---
 function findRepo() {
@@ -118,7 +119,7 @@ function gitPush(repoPath) {
 function getFilesToSync(dir) {
   if (!fs.existsSync(dir)) return [];
   return fs.readdirSync(dir).filter(f =>
-    SYNC_FILES.includes(f) || DEV_LOG_PATTERN.test(f)
+    SYNC_FILES.includes(f) || DEV_LOG_PATTERN.test(f) || TRANSCRIPT_PATTERN.test(f)
   );
 }
 
