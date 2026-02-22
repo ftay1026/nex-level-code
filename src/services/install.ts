@@ -146,7 +146,7 @@ export class InstallService {
     const scriptsDir = tool.paths.scriptsDir;
     await fs.ensureDir(scriptsDir);
 
-    const hooks = ['session-start.js', 'memory-check.js', 'dev-logger.js'];
+    const hooks = ['session-start.js', 'memory-check.js', 'dev-logger.js', 'context-keeper.js', 'dispatch-gate.js'];
 
     for (const hookFile of hooks) {
       const src = path.join(templatesDir, 'hooks', hookFile);
@@ -208,6 +208,10 @@ export class InstallService {
       ],
       Stop: [
         { script: 'nlc-dev-logger.js', timeout: 30 },
+        { script: 'nlc-context-keeper.js', timeout: 30 },
+      ],
+      PreToolUse: [
+        { script: 'nlc-dispatch-gate.js', timeout: 5 },
       ],
     };
 

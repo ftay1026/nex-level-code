@@ -93,6 +93,21 @@ process.stdin.on('end', () => {
       );
     }
 
+    // Inject latest auto-captured context from session-handoff.md
+    if (handoffPath) {
+      try {
+        const handoffContent = fs.readFileSync(handoffPath, 'utf-8');
+        const autoStart = handoffContent.indexOf('<!-- AUTO-CAPTURED');
+        const autoEnd = handoffContent.indexOf('<!-- END AUTO-CAPTURED -->');
+        if (autoStart !== -1 && autoEnd !== -1) {
+          const autoSection = handoffContent.substring(autoStart, autoEnd + '<!-- END AUTO-CAPTURED -->'.length);
+          parts.push('');
+          parts.push('[SESSION CONTEXT] Latest auto-captured state:');
+          parts.push(autoSection);
+        }
+      } catch {}
+    }
+
     // Recent Development Logs
     const today = getDateStr(0);
     const yesterday = getDateStr(1);

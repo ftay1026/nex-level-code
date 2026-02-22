@@ -58,6 +58,13 @@ process.stdin.on('end', () => {
         `Update it with current session progress. Also update MEMORY.md if setup state has changed.`
       );
     }
+
+    // Always inject the dispatch reminder regardless of staleness
+    console.log(
+      `[DISPATCH PROTOCOL] If the user confirmed or approved any approach/fix/feature in their last message, ` +
+      `dispatch it to a sub-agent IMMEDIATELY (with run_in_background: true) before continuing discussion. ` +
+      `Do not hold confirmed work in your context — ship it out and keep talking.`
+    );
   } catch (e) {
     process.exit(0);
   }
